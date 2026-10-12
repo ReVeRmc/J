@@ -362,11 +362,9 @@
         // Проверка подключения к серверу
         async function checkConnection() {
             try {
-                const response = await fetch(SERVER_URL, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: 'ping' })
-                });
+                // Простой GET-запрос без preflight — сервер отдаёт client.html,
+                // если он запущен (для file:// origin POST мог блокироваться CORS)
+                const response = await fetch(SERVER_URL + '/?t=' + Date.now(), { method: 'GET' });
                 
                 if (response.ok) {
                     updateStatus('connected', '✅ Подключено к серверу');
@@ -378,8 +376,9 @@
             }
         }
 
-        // Проверяем подключение при загрузке
+        // Проверяем подключение при загрузке и периодически после этого
         checkConnection();
+        setInterval(checkConnection, 5000);
     </script>
 </body>
 </html>

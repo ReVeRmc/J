@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 title J AI Assistant - Сервер
 cd /d "%~dp0"
 

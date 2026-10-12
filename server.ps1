@@ -5,7 +5,7 @@
 
 param(
     [int]$Port = 8080,
-    [string]$Host = "localhost"
+    [string]$ServerHost = "localhost"
 )
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -63,11 +63,11 @@ function Write-ServerLog {
 
 function Get-AIResponse {
     param(
-        [string]$Input,
+        [string]$UserText,
         [hashtable]$Context
     )
     
-    $lower = $Input.ToLower()
+    $lower = $UserText.ToLower()
     
     # Приветствия
     if ($lower -match "^(привет|здравствуй|хай|hello)\b") {
@@ -117,6 +117,14 @@ function Process-Request {
     
     Write-ServerLog "Получен запрос: $UserInput"
     
+    # Служебный ping от клиента (проверка подключения) — не попадает в историю
+    if ($UserInput -eq "ping") {
+        return @{
+            response = "pong"
+            context = $script:context
+        }
+    }
+
     # Обновляем контекст
     $script:conversationHistory += @{
         role = "user"
@@ -127,7 +135,7 @@ function Process-Request {
     $script:context.turnCount++
     
     # Обработка через AI
-    $response = Get-AIResponse -Input $UserInput -Context $script:context
+    $response = Get-AIResponse -UserText $UserInput -Context $script:context
     
     # Добавляем ответ в историю
     $script:conversationHistory += @{
@@ -146,12 +154,12 @@ function Process-Request {
 
 function Start-Server {
     Write-ServerLog "Запуск сервера J AI Assistant..." "SUCCESS"
-    Write-ServerLog "Сервер доступен на http://$($Host):$Port" "SUCCESS"
+    Write-ServerLog "Сервер доступен на http://$($ServerHost):$Port" "SUCCESS"
     Write-ServerLog "Нажмите Ctrl+C для остановки" "WARNING"
     Write-Host ""
     
     $listener = New-Object System.Net.HttpListener
-    $listener.Prefixes.Add("http://$($Host):$Port/")
+    $listener.Prefixes.Add("http://$($ServerHost):$Port/")
     
     try {
         $listener.Start()
@@ -165,6 +173,33 @@ function Start-Server {
             Write-ServerLog "Получен запрос от $($request.RemoteEndPoint)"
             
             try {
+                # CORS-заголовки (клиент открывается как file://, браузер шлёт preflight-запросы)
+                $response.AddHeader("Access-Control-Allow-Origin", "*")
+                $response.AddHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                $response.AddHeader("Access-Control-Allow-Headers", "Content-Type")
+
+                # Статическая раздача клиента: http://localhost:8080/ -> client.html
+                if ($request.HttpMethod -eq "GET") {
+                    $clientFile = Join-Path $ScriptDir "client.html"
+                    if (Test-Path $clientFile) {
+                        $htmlBytes = [System.IO.File]::ReadAllBytes($clientFile)
+                        $response.ContentType = "text/html; charset=utf-8"
+                        $response.ContentLength64 = $htmlBytes.Length
+                        $response.OutputStream.Write($htmlBytes, 0, $htmlBytes.Length)
+                    } else {
+                        $response.StatusCode = 404
+                    }
+                    $response.OutputStream.Close()
+                    continue
+                }
+
+                # Ответ на preflight-запрос браузера
+                if ($request.HttpMethod -eq "OPTIONS") {
+                    $response.StatusCode = 204
+                    $response.OutputStream.Close()
+                    continue
+                }
+
                 # Читаем тело запроса
                 $reader = New-Object System.IO.StreamReader($request.InputStream, $request.ContentEncoding)
                 $body = $reader.ReadToEnd()
