@@ -202,7 +202,7 @@
         <input 
             type="text" 
             id="messageInput" 
-            placeholder="Введите сообщение..."
+            placeholder="Сообщение или команда (например: покажи список файлов). «помощь» — все команды..."
             autocomplete="off"
         >
         <button class="voice-button" id="voiceButton" title="Голосовой ввод">
@@ -309,7 +309,7 @@
                 removeMessage(loadingId);
 
                 if (data.success) {
-                    addMessage('assistant', data.response);
+                    addMessage('assistant', data.response, false, data.intent);
                     updateStatus('connected', '✅ Подключено к серверу');
                 } else {
                     addMessage('assistant', `❌ Ошибка: ${data.error}`);
@@ -322,7 +322,7 @@
             }
         }
 
-        function addMessage(role, content, isLoading = false) {
+        function addMessage(role, content, isLoading = false, intent = null) {
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${role}`;
             
@@ -332,10 +332,18 @@
             const roleDiv = document.createElement('div');
             roleDiv.className = 'role';
             roleDiv.textContent = role === 'user' ? 'Вы' : 'J';
+            // Показываем распознанное намерение — видно, что именно понял ассистент
+            if (intent && role === 'assistant') {
+                const tag = document.createElement('span');
+                tag.style.cssText = 'float:right; font-size:10px; color:#6b7a94; font-weight:normal;';
+                tag.textContent = `⚙ ${intent}`;
+                roleDiv.appendChild(tag);
+            }
 
             const contentDiv = document.createElement('div');
             contentDiv.className = 'content';
             contentDiv.textContent = content;
+            contentDiv.style.whiteSpace = 'pre-wrap';
 
             messageDiv.appendChild(roleDiv);
             messageDiv.appendChild(contentDiv);
