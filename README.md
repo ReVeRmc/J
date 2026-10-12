@@ -13,13 +13,17 @@
 ### Шаг 1. Запуск сервера
 
 ```powershell
-.\start-server.bat
+.\start-server.bat        # при запуске автоматически запрашивает права администратора
 ```
 
 или напрямую:
 
 ```powershell
+# Windows (от имени администратора):
 powershell -ExecutionPolicy Bypass -File .\server.ps1
+
+# macOS / Linux / Android (Termux + PowerShell 7):
+pwsh -ExecutionPolicy Bypass -File ./server.ps1
 ```
 
 Сервер по умолчанию слушает `http://localhost:8080`.
