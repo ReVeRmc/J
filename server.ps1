@@ -638,14 +638,14 @@ function Add-VoiceNote {
     # Whisper-style заметки: голос через termux-media-player/rec, иначе — текстовая заметка с меткой времени
     param([string]$Text)
     $note = "[{0}] {1}" -f (Get-Date -Format "dd.MM.yyyy HH:mm"), $Text
-    $noteFile = Join-Path $ScriptDir "logs\notes.txt"
+    $noteFile = Join-Path $ScriptDir (Join-Path "logs" "notes.txt")
     Add-Content -Path $noteFile -Value $note -Encoding UTF8
     Write-ActionLog "NOTE_ADD" $noteFile $Text
     return "📝 Заметка сохранена ($noteFile):`n$note"
 }
 
 function Show-Notes {
-    $noteFile = Join-Path $ScriptDir "logs\notes.txt"
+    $noteFile = Join-Path $ScriptDir (Join-Path "logs" "notes.txt")
     if (-not (Test-Path $noteFile)) { return "📝 Заметок пока нет. Скажите: заметка <текст>" }
     $last = Get-Content $noteFile -Encoding UTF8 | Select-Object -Last 15
     return "📝 Последние заметки:`n" + ($last -join "`n")
@@ -766,8 +766,18 @@ function Parse-Intent {
     $t = $Text.Trim()
     $lower = $t.ToLower()
 
-    $quoted = [regex]::Match($t, '["“”«»](.+?)["“”«»]').Groups[1].Value
-    $fileArg = if ($quoted) { $quoted } else { [regex]::Match($lower, '(?:файл|папку|директор\w+|catalog|файла)?\s*[:\-]?\s*([\w\.\-\\/:%~\u0430-\u044f]+)').Groups[1].Value }
+    $quotedRaw = [regex]::Match($t, '["“”«»](.+?)["“”«»]').Groups[1].Value
+    $quoted = if ($quotedRaw -and $quotedRaw -notmatch '\s') { $quotedRaw } else { "" }
+    # Извлечение пути: кавычки → абсолютный путь (C:\, /, ~/, UNC) → после слова «файл/папку X»
+    $pathM  = [regex]::Match($t, '(?i)((?:[A-Za-z]:[\\/]|\\\\|~[/\\]?|/)[^\s"<>|?*]+)')
+    $relM   = [regex]::Match($lower, '(?:файла?|папк[уи]?|директори[ии]?|folder|dir|катало[гга])\s+(?:в\s+)?[:\-]?\s*([\w\.\-\\/%:~а-яё]+)')
+    $fileArg = if ($quoted)           { $quoted }
+               elseif ($pathM.Success) { $pathM.Groups[1].Value }
+               elseif ($relM.Success)  { $relM.Groups[1].Value }
+               else                   { "" }
+    # Очистка хвостов служебных слов и пунктуации
+    $fileArg = ($fileArg -replace '(?i)\s+(?:текст|содержимое|с \u0442екстом|информация|о файле|о папке|в|в|на|for|about)\s*$', '').TrimEnd(',', '.', ';', ':', ' ')
+    $fileArg = ($fileArg -replace '(?i)^(в|\u043d\u0430)\s+', '')
 
     # Программы и команды (кроме «выполни код/задачу» — их обрабатывают правила ниже)
     if ($lower -match "^(выполни|запусти команду|run|команда)\s*[:\-]?\s*(.+)" -and $lower -notmatch "^(выполни\s+(код|задачу)|run code)") {
@@ -791,7 +801,7 @@ function Parse-Intent {
     if ($lower -match "^(exec\s+код|exec|код[:\-\s]|выполни\s+код|run\s+code|interpreter)\s*(?:(python|py|js|javascript|node|ps1|powershell|bash|sh|shell)\b\s*)?[:\-]?\s*(.+)") {
         $langHint = $Matches[2]; $code = $Matches[3].Trim()
         if ($langHint -and $code.ToLower().StartsWith($langHint)) { $code = $code.Substring($langHint.Length).Trim() }
-        $quoted = [regex]::Match($t, '["“”«»](.+?)[\"“”«»]').Groups[1].Value
+        if ($quotedRaw -and $quotedRaw.Length -gt $code.Length * 0.6) { $code = $quotedRaw }
         if ($quoted -and $quoted.Length -gt $code.Length * 0.6) { $code = $quoted }
         return @{ intent = "exec_code"; args = @{ code = $code; lang = $langHint } }
     }
@@ -819,7 +829,7 @@ function Parse-Intent {
     if ($lower -match "^(запомни|запиши в память|remember)\s*[:\-]?\s*(.+)") {
         return @{ intent = "memory_add"; args = @{ fact = $Matches[2].Trim() } }
     }
-    if ($lower -match "^(вспомни|что ты знаешь о|покажи память|recall|memory)\s*[:\-]?\s*(.*)") {
+    if ($lower -match "^(вспомни|что ты знаешь о|что ты помнишь|помнишь что|покажи память|recall|memory)\s*[:\-]?\s*(.*)") {
         return @{ intent = "memory_recall"; args = @{ query = $Matches[2].Trim() } }
     }
     if ($lower -match "^(забудь|удали из памяти|forget)\s*[:\-]?\s*(.+)") {
@@ -841,7 +851,8 @@ function Parse-Intent {
 
     # NL -> команды (Stenography/ShellGPT)
     if ($lower -match "^(переведи в команды|подбери команду|как сделать|nl2cmd|какая команда для)") {
-        $body = $t -replace '^[^:]+:\s*', '' -replace '^(переведи в команды|подбери команду|как сделать|nl2cmd|какая команда для)\s*[:\-]?\s*', ''
+        $body = $t -replace '^(переведи в команды|подбери команду|как сделать|nl2cmd|какая команда для)\s*[:\-]?\s*', ''
+        if (-not $body) { $body = $t }
         return @{ intent = "nl2cmd"; args = @{ text = $body } }
     }
 
@@ -850,8 +861,8 @@ function Parse-Intent {
     }
 
     # Вопросы к базе знаний — «спроси ...»
-    if ($lower -match "^(спроси|объясни|напиши эссе|придумай|сочини|расскажи про|ask llm|спрокси у модели)\s*[:\-]?\s*(.+)") {
-        return @{ intent = "llm_ask"; args = @{ prompt = $Matches[2].Trim() } }
+    if ($lower -match "^(спроси|спроси у модели|объясни|напиши эссе|придумай|сочини|расскажи про|ask kb)\s*[:\-]?\s*(.+)") {
+        return @{ intent = "kb_ask"; args = @{ prompt = $Matches[2].Trim() } }
     }
 
     if ($lower -match "^(расширенная помощь|все навыки|super help|скиллы|умения)") {
@@ -865,7 +876,8 @@ function Parse-Intent {
     }
     if ($lower -match "^(открой|запусти|open|launch)\s+(не\s+)?(.+)") {
         $m = $Matches[3].Trim()
-        if ($m -match "\.(exe|bat|cmd|msi|txt|pdf|docx?|xlsx?|html?|ps1)$" -or (Resolve-SafePath $m)) {
+        $abs = Resolve-SafePath $m
+        if ($m -match "\.[a-zA-Z0-9]{1,5}$" -or ($abs -and (Test-Path $abs))) {
             return @{ intent = "file_open"; args = @{ path = $m } }
         }
         return @{ intent = "open_program"; args = @{ target = $m } }
@@ -873,7 +885,7 @@ function Parse-Intent {
 
     # Диалог о коде с активным файлом ("измени", "покажи строку N")
     if ($lower -match "^(измени|исправь|замени|поправь|edit|fix)\b") {
-        $mm = [regex]::Match($t, '(?i)замени\s+"?(.+?)"?\s+(на|=>|->)\s+"?(.+?)"?$')
+        $mm = [regex]::Match($t, '(?i)замени\s*["“«]?(.+?)["”»]?\s+(на|в|=>|->)\s*["“«]?(.+?)["”»]?$')
         if ($mm.Success) {
             return @{ intent = "file_replace"; args = @{ path = $fileArg; find = $mm.Groups[1].Value; replace = $mm.Groups[3].Value } }
         }
@@ -881,20 +893,25 @@ function Parse-Intent {
     }
 
     # Файловые операции
-    if ($lower -match "^(покажи список|список|ls|dir|что в|покажи папку|покажи файлы)") {
+    if ($lower -match "^(покажи список|список файлов|ls|dir|что в |покажи папку|покажи файлы|покажи содержимое папки)") {
         return @{ intent = "file_list"; args = @{ path = $fileArg } }
     }
-    if ($lower -match "^(прочитай|открой для чтения|покажи содержимое|покажи файл|читай|cat|read)\b") {
+    if ($lower -match "^(прочитай|открой для чтения|покажи содержимое( файла)?|покажи файл|читай|cat|read)\b") {
         return @{ intent = "file_read"; args = @{ path = $fileArg } }
     }
-    if ($lower -match "^(создай файл|запиши|сохрани|create file|write|new file)\b") {
-        $contentM = [regex]::Match($t, '(?i)(?:текст|содержимое|строку|строки)[:\-\s]*["“”](.*?)["“”]')
-        $body = if ($contentM.Success) { $contentM.Groups[1].Value } else { "" }
+    if ($lower -match "^(создай файл|запиши файл|запиши|сохрани|create file|write|new file)\b") {
+        $contentM = [regex]::Match($t, '(?i)(?:текст|содержимое|строку|строки)\s*[:\-–—]?\s*(.+)$')
+        if (-not $contentM.Success) { $contentM = [regex]::Match($t, '[“”«"](.*?)[“”»"]\s*$') }
+        if (-not $contentM.Success) { $contentM = [regex]::Match($t, '[:\-–—]\s*(.+)$') }
+        $body = if ($contentM.Success) { $contentM.Groups[1].Value.Trim(' ', '"', '“', '”', '«', '»') } else { "" }
         return @{ intent = "file_write"; args = @{ path = $fileArg; content = $body } }
     }
     if ($lower -match "^(добавь в файл|допиши|append)\b") {
-        $contentM = [regex]::Match($t, '["“”](.*?)["“”]')
-        return @{ intent = "file_append"; args = @{ path = $fileArg; content = $contentM.Groups[1].Value } }
+        $contentM = [regex]::Match($t, '(?i)(?:текст|содержимое)\s*[:\-–—]?\s*(.+)$')
+        if (-not $contentM.Success) { $contentM = [regex]::Match($t, '[“”«"](.*?)[“”»"]\s*$') }
+        if (-not $contentM.Success) { $contentM = [regex]::Match($t, '[:\-–—]\s*(.+)$') }
+        $appBody = if ($contentM.Success) { $contentM.Groups[1].Value.Trim(' ', '"', '“', '”', '«', '»') } else { "" }
+        return @{ intent = "file_append"; args = @{ path = $fileArg; content = $appBody } }
     }
     if ($lower -match "^(удали|delete|remove|стер|убери)\b") {
         return @{ intent = "file_delete"; args = @{ path = $fileArg } }
@@ -996,12 +1013,12 @@ function Execute-Intent {
         "nl2cmd"            { return @(@{ response = Translate-NlToCommands $args2.text }, $intent) }
         "web_fetch"         { return @(@{ response = Invoke-WebRequestSkill $args2.url }, $intent) }
         "api_call"          { return @(@{ response = Invoke-ApiCall -Method $args2.method -Url $args2.url -Body $args2.body }, $intent) }
-        "llm_ask"           {
+        "kb_ask"            {
             # отвечаем из встроенной базы знаний
             $kbHit = $null
             foreach ($key in $script:knowledgeBase.Keys) {
                 foreach ($kw in $script:knowledgeBase[$key].keywords) {
-                    if ($args2.prompt.ToLower() -match $kw) { $kbHit = $script:knowledgeBase[$key].text; break }
+                    if ($args2.prompt.ToLower() -match ('(?i)\b' + [regex]::Escape($kw) + '\b')) { $kbHit = $script:knowledgeBase[$key].text; break }
                 }
                 if ($kbHit) { break }
             }
