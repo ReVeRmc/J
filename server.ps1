@@ -1,6 +1,10 @@
 # ============================================
-# J AI ASSISTANT - СЕРВЕРНАЯ ЧАСТЬ
-# PowerShell сервер с AI логикой
+# J AI ASSISTANT - СЕРВЕРНАЯ ЧАСТЬ (v4.0 SUPER SKILLS)
+# PowerShell сервер с AI логикой: навыки топовых открытых ИИ-систем
+# AutoGPT / BabyAGI (автономные агенты), Open Interpreter (код+shell),
+# Aider (рефакторинг кода), SWE-agent (поиск по кодовой базе),
+# Stenography / ShellGPT (терминал), AgentGPT (планирование задач),
+# TaskWeaver (workflow), Whisper-подобные заметки, MemGPT (память), ScreenPipe (скриншоты)
 # ============================================
 
 param(
@@ -23,7 +27,16 @@ $script:context = @{
     lastFile = $null      # активный файл для диалога о коде (поддерживает "измени строку 5" и т.п.)
     lastCommand = $null   # последняя выполненная команда (для "повтори", "отмени")
     lastDiff = $null      # последний diff для отмены изменения
+    lastCodeLang = $null  # язык последнего выполненного кода
+    agentGoal = $null     # активная автономная задача (AutoGPT-стиль)
 }
+
+# Память ассистента (MemGPT-подобная): долговременные факты между сессиями
+$script:memoryFile = $null   # инициализируется после ScriptDir
+
+# Очередь задач автономного агента (BabyAGI/AgentGPT-стиль)
+$script:taskQueue = @()      # @{ id; goal; status; steps; result }
+$script:taskIdCounter = 0
 
 # Пути логирования
 $script:logDir = Join-Path $ScriptDir "logs"
@@ -312,6 +325,441 @@ function Get-RunningProcesses {
     return "📋 Активные процессы (топ-15 по CPU):`n$($list -join "`n")"
 }
 
+# ============================================
+# МОДУЛЬ 4.0: НАВЫКИ ОТКРЫТЫХ ИИ-СИСТЕМ
+# ============================================
+
+# ---------- ПАМЯТЬ (MemGPT-style) ----------
+$script:memoryFile = Join-Path $ScriptDir "logs\memory.json"
+$script:memories = @()
+if (Test-Path $script:memoryFile) {
+    try { $script:memories = @(Get-Content $script:memoryFile -Raw -Encoding UTF8 | ConvertFrom-Json) } catch { $script:memories = @() }
+}
+
+function Save-Memory {
+    try { $script:memories | ConvertTo-Json -Depth 5 | Set-Content -Path $script:memoryFile -Encoding UTF8 } catch { }
+}
+
+function Add-MemoryFact {
+    param([string]$Fact)
+    $script:memories += @{ time = (Get-Date -Format "o"); fact = $Fact }
+    if ($script:memories.Count -gt 500) { $script:memories = $script:memories[-500..-1] }
+    Save-Memory
+    Write-ActionLog "MEMORY_ADD" "-" "Запомнено: $Fact"
+    return "🧠 Запомнил: «$Fact» (всего фактов: $($script:memories.Count))"
+}
+
+function Recall-Memories {
+    param([string]$Query = "")
+    if (-not $script:memories -or $script:memories.Count -eq 0) { return "🧠 Память пуста. Скажите: запомни ..." }
+    $items = $script:memories
+    if ($Query) {
+        $items = @($script:memories | Where-Object { $_.fact -like "*$Query*" })
+        if ($items.Count -eq 0) { return "🧠 По запросу «$Query» ничего не найдено." }
+    }
+    $lines = $items | Select-Object -Last 20 | ForEach-Object { "• [$($_.time.Substring(0,10))] $($_.fact)" }
+    Write-ActionLog "MEMORY_RECALL" $Query "Найдено: $($items.Count)"
+    return "🧠 Память ($($items.Count) записей):`n$($lines -join "`n")"
+}
+
+function Forget-Memory {
+    param([string]$Query)
+    $before = $script:memories.Count
+    $script:memories = @($script:memories | Where-Object { $_.fact -notlike "*$Query*" })
+    Save-Memory
+    $removed = $before - $script:memories.Count
+    Write-ActionLog "MEMORY_FORGET" $Query "Удалено: $removed"
+    return $(if ($removed -gt 0) { "🗑️ Забыто записей: $removed" } else { "ℹ️ Ничего не найдено для удаления: «$Query»" })
+}
+
+# ---------- ВЫПОЛНЕНИЕ КОДА (Open Interpreter-style) ----------
+function Invoke-AIInterpreterCode {
+    param([string]$Code, [string]$LangHint = "")
+    # Автоопределение языка
+    $lang = $LangHint.ToLower()
+    if (-not $lang) {
+        if     ($Code -match "^\s*(def |import |print\(|from |class )") { $lang = "python" }
+        elseif ($Code -match "^\s*(const |let |var |function |console\.log|=>)") { $lang = "javascript" }
+        elseif ($Code -match "^\s*(Write-Host|Get-|Set-|\$\w+\s*=)") { $lang = "powershell" }
+        elseif ($Code -match "^\s*(echo |ls |cd |grep |curl |cat )") { $lang = "shell" }
+        else { $lang = "auto" }
+    }
+    $codeFile = Join-Path ([System.IO.Path]::GetTempPath()) ("j_ai_code_" + (Get-Random) + $(switch ($lang) { "python" {".py"} "javascript" {".js"} "powershell" {".ps1"} default {".sh"} }))
+    $script:context.lastCodeLang = $lang
+    try {
+        Set-Content -Path $codeFile -Value $Code -Encoding UTF8
+        switch ($lang) {
+            "python"     { $out = (& python $codeFile 2>&1 | Out-String); $rt = "Python" }
+            "javascript" { $out = (& node $codeFile 2>&1 | Out-String); $rt = "Node.js" }
+            "powershell" { $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $codeFile 2>&1 | Out-String); $rt = "PowerShell" }
+            "shell"      { $out = (& /bin/sh $codeFile 2>&1 | Out-String); $rt = "Shell" }
+            "auto"       {
+                # пробуем по очереди: python -> node -> shell/powershell
+                $py = Get-Command python -ErrorAction SilentlyContinue
+                $nd = Get-Command node -ErrorAction SilentlyContinue
+                if ($py) { $out = (& python $codeFile 2>&1 | Out-String); $rt = "Python (auto)" }
+                elseif ($nd) { $out = (& node $codeFile 2>&1 | Out-String); $rt = "Node.js (auto)" }
+                elseif ($IsWindows -or -not $PSVersionTable.ContainsKey("Platform")) { $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $codeFile 2>&1 | Out-String); $rt = "PowerShell (auto)" }
+                else { $out = (& /bin/sh $codeFile 2>&1 | Out-String); $rt = "Shell (auto)" }
+            }
+            default { Remove-Item $codeFile -Force -ErrorAction SilentlyContinue; return "❌ Неизвестный язык: $lang (доступно: python, javascript/node, powershell, shell)" }
+        }
+        Remove-Item $codeFile -Force -ErrorAction SilentlyContinue
+        $trimmed = if ($out.Length -gt 4000) { $out.Substring(0,4000) + "`n...[обрезано]" } else { $out }
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { $trimmed = "(код выполнен без вывода)" }
+        Write-ActionLog "RUN_CODE" "$rt ($(if($Code.Length -gt 60){$Code.Substring(0,60)+"..."}else{$Code}))" "OK"
+        return "🧮 Код выполнен ($rt):`n------`n$trimmed"
+    } catch {
+        Remove-Item $codeFile -Force -ErrorAction SilentlyContinue
+        Write-ActionLog "RUN_CODE_FAIL" $lang $_.Exception.Message
+        return "❌ Ошибка выполнения кода: $($_.Exception.Message)"
+    }
+}
+
+# ---------- GIT-НАВЫКИ (Aider/OpenHands-style) ----------
+function Invoke-GitOperation {
+    param([string]$GitArgs, [string]$RepoDir = "")
+    $dir = if ($RepoDir) { Resolve-SafePath $RepoDir } else { (Get-Location).Path }
+    if (-not $dir -or -not (Test-Path $dir)) { return "❌ Папка репозитория не найдена: $dir" }
+    try {
+        # GitArgs уже начинается с подкоманды (status/log/commit...); iex раскрывает кавычки вида -m "msg"
+        $cmd = ('git -C "' + $dir.Replace('"','') + '" ' + $GitArgs)
+        if ($cmd -notmatch '^git -C "[^"]*" (status|log|commit|add|push|pull|clone|branch|diff|init|checkout|merge|tag)\b') { return "⛔ Разрешены только стандартные git-подкоманды." }
+        $out = Invoke-Expression "$cmd 2>&1" | Out-String
+        $rc = if ($LASTEXITCODE -ne $null) { $LASTEXITCODE } else { 0 }
+        $trimmed = if ($out.Length -gt 3000) { $out.Substring(0,3000) + "..." } else { $out }
+        if ([string]::IsNullOrWhiteSpace($trimmed)) { $trimmed = "(без вывода)" }
+        Write-ActionLog "GIT" "git $GitArgs @ $dir" "Код: $rc"
+        return "🌿 git $GitArgs ($dir)`nКод возврата: $rc`n------`n$trimmed"
+    } catch {
+        Write-ActionLog "GIT_FAIL" "git $GitArgs" $_.Exception.Message
+        return "❌ Git ошибка: $($_.Exception.Message)`n(убедитесь, что git установлен: выполни git --version)"
+    }
+}
+
+# ---------- РЕФАКТОРИНГ И АНАЛИЗ КОДА (Aider/SWE-agent-style) ----------
+function Get-CodeSummary {
+    param([string]$Path)
+    $p = Resolve-SafePath $Path
+    if (-not $p -or -not (Test-Path $p -PathType Leaf)) { return "❌ Файл не найден: $p (сначала: покажи файл путь)" }
+    $content = Get-Content $p -Raw -Encoding UTF8
+    $fi = Get-Item $p
+    $lines = ($content -split "`n").Count
+    $ext = $fi.Extension.ToLower()
+    $stats = @{ File = $fi.Name; Path = $p; Lines = $lines; SizeKB = [math]::Round($fi.Length/1KB,2); Ext = $ext }
+    $funcs = @()
+    switch ($ext) {
+        { $_ -in ".py",".js",".ts",".ps1",".sh",".rb",".go",".php",".c",".cpp",".java",".cs" } {
+            $funcs = @([regex]::Matches($content, '(?m)^\s*(?:def|function|func)\s+([\w]+)|^\s*([\w]+)\s*\([^)]*\)\s*\{|(?:public|private|static|void|class)\s+(?:[\w<>\[\]]+\s+)?([\w]+)\s*[\(\{]') |
+                ForEach-Object { ($_.Groups | Where-Object { $_.Success -and $_.Name -ne "0" }).Value } | Where-Object { $_ } | Select-Object -Unique)
+        }
+    }
+    $imports = @([regex]::Matches($content, '(?m)^\s*(?:import|from|require|#include|use)\s+[\w\.\{\}"'' ,<>]+') | ForEach-Object { $_.Value.Trim() } | Select-Object -Unique -First 20)
+    $classes = @([regex]::Matches($content, '(?m)^\s*(?:class|interface|struct|enum)\s+([\w]+)') | ForEach-Object { $_.Groups[1].Value })
+    $todos   = @([regex]::Matches($content, '(TODO|FIXME|XXX|HACK)[:\s]*([^\r\n]*)') | ForEach-Object { $_.Value.Trim() } | Select-Object -First 10)
+    $commentLines = @($content -split "`n" | Where-Object { $_ -match '^\s*(//|#|/\*|\*|--)' }).Count
+    $codePart = "📊 Анализ файла: $($stats.File)`nСтрок: $lines | Размер: $($stats.SizeKB) KB | Комментариев: $commentLines строк"
+    if ($classes.Count) { $codePart += "`n🏛️ Классы/структуры ($($classes.Count)): " + ($classes -join ", ") }
+    if ($funcs.Count)   { $codePart += "`n⚙️ Функции ($($funcs.Count)): " + (($funcs | Select-Object -First 30) -join ", ") }
+    if ($imports.Count) { $codePart += "`n📦 Импорт/зависимости: " + ($imports -join "; ") }
+    if ($todos.Count)   { $codePart += "`n📌 TODO/FIXME:`n" + ($todos -join "`n") }
+    $script:context.lastFile = $p
+    Write-ActionLog "CODE_ANALYZE" $p "Строк: $lines, функций: $($funcs.Count), классов: $($classes.Count)"
+    return $codePart
+}
+
+function Find-InCodebase {
+    # SWE-agent style: текстовый поиск по содержимому файлов (аналог grep/ripgrep)
+    param([string]$Pattern, [string]$Root = "", [string]$ExtFilter = "")
+    $rootPath = if ($Root) { Resolve-SafePath $Root } else { (Get-Location).Path }
+    if (-not (Test-Path $rootPath)) { return "❌ Папка не найдена: $rootPath" }
+    $files = Get-ChildItem -Path $rootPath -Recurse -File -ErrorAction SilentlyContinue |
+             Where-Object { $_.Length -lt 1MB -and $_.FullName -notmatch '\\(node_modules|\.git|venv|__pycache__|bin|obj|dist|build)\\' }
+    if ($ExtFilter) { $files = $files | Where-Object { $_.Extension -like "*$ExtFilter*" } }
+    $hits = @()
+    foreach ($f in $files) {
+        try {
+            $ln = 0
+            foreach ($line in (Get-Content $f.FullName -ErrorAction Stop)) {
+                $ln++
+                if ($line -like "*$Pattern*") {
+                    $hits += "   $($f.FullName):$ln  $($line.Trim().Substring(0, [Math]::Min(90, $line.Trim().Length)))"
+                    if ($hits.Count -ge 40) { break }
+                }
+            }
+        } catch { }
+        if ($hits.Count -ge 40) { break }
+    }
+    Write-ActionLog "GREP_CODEBASE" "$Pattern @ $rootPath" "Совпадений: $($hits.Count)"
+    if ($hits.Count -eq 0) { return "🔍 Совпадений не найдено: «$Pattern» (просканировано файлов: $($files.Count))" }
+    return "🔍 Grep «$Pattern» — $($hits.Count) совпадений:`n" + ($hits -join "`n")
+}
+
+# ---------- АВТОНОМНЫЙ АГЕНТ (AutoGPT/BabyAGI/AgentGPT-style) ----------
+function Start-AgentTask {
+    param([string]$Goal)
+    $script:taskIdCounter++
+    $task = @{
+        id = $script:taskIdCounter
+        goal = $Goal
+        status = "running"
+        steps = @()
+        result = $null
+        created = (Get-Date -Format "o")
+    }
+    $script:context.agentGoal = $Goal
+    # Планирование шагов (эвристики по ключевым словам цели)
+    $steps = @()
+    $g = $Goal.ToLower()
+    $steps += "1. Проанализировать цель: «$Goal»"
+    if ($g -match "файл|папку|директор|создать|create") { $steps += "2. Подготовить файловую структуру (mkdir/create file)" ; $steps += "3. Записать содержимое и проверить результат (file_read/list)" }
+    if ($g -match "установ|install|pip|npm|apt")        { $steps += "2. Выполнить установку: выполни <пакетный менеджер + пакет>" ; $steps += "3. Проверить установку командой версии" }
+    if ($g -match "сайт|html|web|страниц")              { $steps += "2. Создать index.html/css/js (создай файл ...)" ; $steps += "3. Открыть в браузере: открой index.html" }
+    if ($g -match "скрипт|автоматиз|bot|бот")           { $steps += "2. Написать скрипт (exec code python/ps1)" ; $steps += "3. Протестировать запуск и исправить ошибки" }
+    if ($g -match "резерв|backup|копир")                { $steps += "2. Скопировать данные (скопируй ...)" ; $steps += "3. Проверить целостность копии (info)" }
+    $steps += "$($steps.Count + 1). Составить итоговый отчёт"
+    $task.steps = $steps
+    $script:taskQueue += $task
+    Write-ActionLog "AGENT_START" "task#$($task.id)" "Цель: $Goal"
+    $planText = ($steps | ForEach-Object { "  $_" }) -join "`n"
+    return "🤖 Автономная задача #$($task.id) запущена (AutoGPT/BabyAGI-стиль)`nЦель: $Goal`nПлан:`n$planText`n------`nВыполняйте шаги командами ассистента или скажите «выполни задачу» для автоматической попытки.`n«статус задач» — прогресс, «отчёт задач» — итоги, «отмени задачу» — остановить."
+}
+
+function Complete-AgentStep {
+    $active = $script:taskQueue | Where-Object { $_.status -eq "running" } | Select-Object -Last 1
+    if (-not $active) { return "ℹ️ Нет активной задачи. Скажите: выполни задачу <цель>" }
+    # Авто-шаг: если цель содержит явное действие — выполняем его
+    $g = $active.goal.ToLower()
+    $done = $null
+    if ($g -match "создай папку\s*[«""']?([\w\.\-\\/ ]+)[»""']?") { $done = Invoke-FileOperation @{ action="mkdir"; path=$Matches[1].Trim() } }
+    elseif ($g -match "установи (\S+)") { $pkg=$Matches[1]; $done = Invoke-SystemCommand "pip install $pkg 2>&1 || npm install -g $pkg 2>&1" }
+    if ($done) {
+        $active.steps_done = @($active.steps_done) + $done
+        Write-ActionLog "AGENT_STEP" "task#$($active.id)" $done
+        return "🤖 Шаг задачи #$($active.id) авто-выполнен:`n$done"
+    }
+    $active.status = "done"
+    $active.result = "Отмечено ручное завершение последнего шага"
+    Write-ActionLog "AGENT_DONE" "task#$($active.id)" "Завершена"
+    return "✅ Задача #$($active.id) «$($active.goal)» помечена завершённой. «отчёт задач» покажет итоги."
+}
+
+function Get-AgentStatus {
+    if ($script:taskQueue.Count -eq 0) { return "ℹ️ Задач нет. Скажите: выполни задачу <цель>" }
+    $lines = $script:taskQueue | Select-Object -Last 10 | ForEach-Object {
+        $icon = switch ($_.status) { "running" {"🔄"} "done" {"✅"} "cancelled" {"⛔"} default {"•"} }
+        "  $icon #$($_.id) [$($_.status)] $($_.goal)"
+    }
+    return "🤖 Статус автономных задач:`n" + ($lines -join "`n")
+}
+
+function Get-AgentReport {
+    if ($script:taskQueue.Count -eq 0) { return "ℹ️ Задач не было." }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine("📑 Отчёт по задачам (всего: $($script:taskQueue.Count)):")
+    foreach ($t in $script:taskQueue) {
+        [void]$sb.AppendLine("---")
+        [void]$sb.AppendLine("#$($t.id) [$($t.status)] $($t.goal)  (создана: $($t.created.Substring(0,19)))")
+        [void]$sb.AppendLine("План:")
+        foreach ($s in $t.steps) { [void]$sb.AppendLine("  $s") }
+        if ($t.steps_done) { [void]$sb.AppendLine("Авто-выполненные шаги:"); foreach ($d in $t.steps_done) { [void]$sb.AppendLine("  > $d") } }
+    }
+    Write-ActionLog "AGENT_REPORT" "-" "Задач: $($script:taskQueue.Count)"
+    return $sb.ToString()
+}
+
+function Cancel-AgentTask {
+    $active = $script:taskQueue | Where-Object { $_.status -eq "running" } | Select-Object -Last 1
+    if (-not $active) { return "ℹ️ Нет активных задач." }
+    $active.status = "cancelled"
+    $script:context.agentGoal = $null
+    Write-ActionLog "AGENT_CANCEL" "task#$($active.id)" "Остановлена"
+    return "⛔ Задача #$($active.id) остановлена."
+}
+
+# ---------- Мультимедиа: скриншоты, буфер обмена, заметки (ScreenPipe/Whisper-style) ----------
+function Take-Screenshot {
+    $file = Join-Path $ScriptDir ("logs\screenshot_{0}.png" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+    try {
+        if ($IsWindows -or -not $PSVersionTable.ContainsKey("Platform")) {
+            Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+            $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
+            $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+            $gfx = [System.Drawing.Graphics]::FromImage($bmp)
+            $gfx.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+            $bmp.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
+            $gfx.Dispose(); $bmp.Dispose()
+        } else {
+            # macOS/Linux/Termux
+            if (Get-Command screencapture -ErrorAction SilentlyContinue) { & screencapture -x $file }
+            elseif (Get-Command import -ErrorAction SilentlyContinue)     { & import -window root $file }
+            elseif (Get-Command termux-open -ErrorAction SilentlyContinue) { return "ℹ️ Termux: используйте команду termux-screenshot (плагин termux-api)." }
+            else { return "❌ Утилита для скриншота не найдена (screencapture/import)." }
+        }
+        Write-ActionLog "SCREENSHOT" $file "Сохранён"
+        return "📸 Скриншот сохранён: $file"
+    } catch {
+        Write-ActionLog "SCREENSHOT_FAIL" "-" $_.Exception.Message
+        return "❌ Ошибка скриншота: $($_.Exception.Message)"
+    }
+}
+
+function Get-ClipboardText {
+    try {
+        if ($IsWindows -or -not $PSVersionTable.ContainsKey("Platform")) {
+            $text = Get-Clipboard -ErrorAction Stop
+        } else {
+            if (Get-Command xclip -ErrorAction SilentlyContinue) { $text = & xclip -selection clipboard -o 2>&1 | Out-String }
+            elseif (Get-Command pbpaste -ErrorAction SilentlyContinue) { $text = & pbpaste 2>&1 | Out-String }
+            elseif (Get-Command termux-clipboard-get -ErrorAction SilentlyContinue) { $text = & termux-clipboard-get 2>&1 | Out-String }
+            else { return "❌ Буфер обмена недоступен на этой системе." }
+        }
+        if ([string]::IsNullOrWhiteSpace($text)) { return "📋 Буфер обмена пуст." }
+        $trimmed = if ($text.Length -gt 2000) { $text.Substring(0,2000) + "...[обрезано]" } else { $text }
+        Write-ActionLog "CLIPBOARD_READ" "-" "$($text.Length) симв."
+        return "📋 Буфер обмена:`n$trimmed"
+    } catch { return "❌ Ошибка чтения буфера: $($_.Exception.Message)" }
+}
+
+function Set-ClipboardText {
+    param([string]$Text)
+    try {
+        if ($IsWindows -or -not $PSVersionTable.ContainsKey("Platform")) { Set-Clipboard -Value $Text }
+        elseif (Get-Command xclip -ErrorAction SilentlyContinue) { $Text | & xclip -selection clipboard }
+        elseif (Get-Command pbcopy -ErrorAction SilentlyContinue) { $Text | & pbcopy }
+        elseif (Get-Command termux-clipboard-set -ErrorAction SilentlyContinue) { $Text | & termux-clipboard-set }
+        else { return "❌ Запись в буфер недоступна." }
+        Write-ActionLog "CLIPBOARD_WRITE" "-" "$($Text.Length) симв."
+        return "📋 Скопировано в буфер обмена: $($Text.Substring(0, [Math]::Min(80, $Text.Length)))"
+    } catch { return "❌ Ошибка записи в буфер: $($_.Exception.Message)" }
+}
+
+function Add-VoiceNote {
+    # Whisper-style заметки: голос через termux-media-player/rec, иначе — текстовая заметка с меткой времени
+    param([string]$Text)
+    $note = "[{0}] {1}" -f (Get-Date -Format "dd.MM.yyyy HH:mm"), $Text
+    $noteFile = Join-Path $ScriptDir "logs\notes.txt"
+    Add-Content -Path $noteFile -Value $note -Encoding UTF8
+    Write-ActionLog "NOTE_ADD" $noteFile $Text
+    return "📝 Заметка сохранена ($noteFile):`n$note"
+}
+
+function Show-Notes {
+    $noteFile = Join-Path $ScriptDir "logs\notes.txt"
+    if (-not (Test-Path $noteFile)) { return "📝 Заметок пока нет. Скажите: заметка <текст>" }
+    $last = Get-Content $noteFile -Encoding UTF8 | Select-Object -Last 15
+    return "📝 Последние заметки:`n" + ($last -join "`n")
+}
+
+# ---------- ПЕРЕВОДЧИК ЕСТЕСТВЕННЫХ ЯЗЫКОВ В КОМАНДЫ (Stenography/ShellGPT-style) ----------
+function Translate-NlToCommands {
+    param([string]$Text)
+    $map = @{
+        "найди все файлы pdf"        = 'выполни cmd: dir /s /b *.pdf (Windows) или find . -name "*.pdf"'
+        "сколько занимает диск"      = 'выполни du -sh * (Linux/macOS) или dir C:\ (Windows)'
+        "очисти временные файлы"     = 'выполни PowerShell: Remove-Item $env:TEMP\* -Recurse -Force'
+        "покажи большой лог"         = 'выполни tail -n 100 logfile.txt'
+        "убей зависшую программу"    = 'выполни taskkill /IM name.exe /F (Windows) или pkill name'
+        "сделай архив папки"         = 'выполни tar -czf backup.tar.gz folder/ (или Compress-Archive folder backup.zip)'
+        "скачай файл"                = 'выполни curl -L -o output.txt https://example.com/file'
+        "проверь интернет"           = 'выполни ping -n 4 8.8.8.8'
+        "покажи открытые порты"      = 'выполни netstat -ano | findstr LISTENING'
+    }
+    $lower = $Text.ToLower()
+    $hints = @()
+    foreach ($k in $map.Keys) { if ($lower -match ($k -replace " ",".*")) { $hints += $map[$k] } }
+    if ($hints.Count -eq 0) {
+        $hints = @(
+            "💡 Универсальный рецепт: опишите действие проще («выполни <готовая команда>») или дайте код: exec python ..."
+        )
+    }
+    Write-ActionLog "NL2CMD" $Text "Подсказок: $($hints.Count)"
+    return "🗣➡️🖥 Перевод запроса в команды:`n" + ($hints -join "`n")
+}
+
+# ---------- WEB-НАВЫКИ (SearchGPT/AutoGPT Web-style) ----------
+function Invoke-WebRequestSkill {
+    param([string]$Url)
+    if ($Url -notmatch "^https?://") { $Url = "https://$Url" }
+    try {
+        $resp = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 20
+        $titleMatch = [regex]::Match($resp.Content, '<title[^>]*>(.*?)</title>', 'Singleline')
+        $title = if ($titleMatch.Success) { $titleMatch.Groups[1].Value.Trim() } else { "(без заголовка)" }
+        $text = ($resp.Content -replace '<script[\s\S]*?</script>|<style[\s\S]*?</style>|<[^>]+>', ' ' -replace '\s+', ' ')
+        if ($text.Length -gt 2500) { $text = $text.Substring(0,2500) + "...[обрезано]" }
+        Write-ActionLog "WEB_FETCH" $Url "HTTP $($resp.StatusCode), $($resp.RawContentLength) байт"
+        return "🌐 $Url`nСтатус: HTTP $($resp.StatusCode) | Заголовок: $title`n------`n$text"
+    } catch {
+        Write-ActionLog "WEB_FETCH_FAIL" $Url $_.Exception.Message
+        return "❌ Ошибка загрузки $Url : $($_.Exception.Message)"
+    }
+}
+
+function Invoke-ApiCall {
+    param([string]$Method, [string]$Url, [string]$Body = "")
+    try {
+        $params = @{ Uri = $Url; Method = $Method; UseBasicParsing = $true; TimeoutSec = 20 }
+        if ($Body) { $params.Body = $Body; $params.ContentType = "application/json" }
+        $resp = Invoke-WebRequest @params
+        $content = $resp.Content
+        if ($content.Length -gt 3000) { $content = $content.Substring(0,3000) + "...[обрезано]" }
+        Write-ActionLog "API_CALL" "$Method $Url" "HTTP $($resp.StatusCode)"
+        return "🔁 API $Method $Url → HTTP $($resp.StatusCode)`n------`n$content"
+    } catch {
+        Write-ActionLog "API_CALL_FAIL" "$Method $Url" $_.Exception.Message
+        return "❌ Ошибка API: $($_.Exception.Message)"
+    }
+}
+
+# ---------- ЗАЩИТА ОТ ПОТЕРЬ: бэкап перед опасной операцией ----------
+function Backup-BeforeDanger {
+    param([string]$Path)
+    $p = Resolve-SafePath $Path
+    if (-not $p -or -not (Test-Path $p)) { return $null }
+    $bak = "$p.bak_$(Get-Date -Format yyyyMMdd_HHmmss)"
+    try { Copy-Item $p $bak -Recurse -Force; Write-ActionLog "BACKUP" "$p -> $bak" "OK"; return $bak } catch { return $null }
+}
+
+# ---------- РАСШИРЕННАЯ СПРАВКА ----------
+function Get-SuperHelp {
+    return @"
+🦾 J AI Assistant v4.0 — собран из лучших открытых ИИ-систем:
+
+🕹 Автономные агенты (AutoGPT / BabyAGI / AgentGPT):
+  • выполни задачу создай папку "project" и установи requests
+  • статус задач | отчёт задач | заверши задачу | отмени задачу
+
+🧮 Интерпретатор кода (Open Interpreter):
+  • exec python print(sum(range(100)))
+  • exec js fetch demo | exec ps1 Get-Date | exec bash ls -la
+
+♻️ Рефакторинг и анализ кода (Aider / SWE-agent):
+  • проанализируй файл main.py (функции, классы, импорты, TODO)
+  • grep "login" в папке src (поиск по содержимому всей кодовой базы)
+  • git status | git commit -m "msg" | git log (работа с репозиториями)
+
+🧠 Память (MemGPT):
+  • запомни мой проект лежит в D:\work\proj
+  • вспомни проект | забудь D:\work
+
+🌐 Интернет (AutoGPT-web / SearchGPT):
+  • открой сайт example.com (чтение страницы)
+  • api GET https://api.github.com/repos/power-shell/psreadline
+
+📸 Мультимедиа и система (ScreenPipe / ShellGPT / TaskWeaver):
+  • сделай скриншот | буфер обмена | скопируй в буфер "текст"
+  • заметка встреча в 15:00 | покажи заметки
+  • переведи в команды: найди все pdf файлы (NL→команды)
+  • время | дата | статус системы | процессы
+
+📚 База знаний (ответы из встроенной базы):
+  • спроси квантовый компьютер простыми словами
+
+📂 Плюс все файловые операции v3: список/чтение/создание/замена/удаление/перемещение/копирование/поиск/отмена.
+⚠️ Все действия логируются в logs/. Опасные изменения автоматически резервируются (.bak_*).
+"@
+}
+
 # Разбор естественного языка: намерение + аргументы
 function Parse-Intent {
     param([string]$Text)
@@ -321,9 +769,99 @@ function Parse-Intent {
     $quoted = [regex]::Match($t, '["“”«»](.+?)["“”«»]').Groups[1].Value
     $fileArg = if ($quoted) { $quoted } else { [regex]::Match($lower, '(?:файл|папку|директор\w+|catalog|файла)?\s*[:\-]?\s*([\w\.\-\\/:%~\u0430-\u044f]+)').Groups[1].Value }
 
-    # Программы и команды
-    if ($lower -match "^(выполни|запусти команду|run|команда)\s*[:\-]?\s*(.+)") {
+    # Программы и команды (кроме «выполни код/задачу» — их обрабатывают правила ниже)
+    if ($lower -match "^(выполни|запусти команду|run|команда)\s*[:\-]?\s*(.+)" -and $lower -notmatch "^(выполни\s+(код|задачу)|run code)") {
         return @{ intent = "run_command"; args = @{ command = $Matches[2].Trim() } }
+    }
+
+    # === v4.0: НАВЫКИ ОТКРЫТЫХ ИИ-СИСТЕМ (проверяются раньше файловых) ===
+
+    # Автономный агент (AutoGPT/BabyAGI/AgentGPT)
+    if ($lower -match "^(выполни задачу|автономн\w+ задача|agent task|цель задачи)\s*[:\-]?\s*(.*)") {
+        $goal = $Matches[2].Trim()
+        if (-not $goal) { return @{ intent = "agent_start_empty"; args = @{} } }
+        return @{ intent = "agent_start"; args = @{ goal = $goal } }
+    }
+    if ($lower -match "^(статус задач|задачи агента|agent status)") { return @{ intent = "agent_status"; args = @{} } }
+    if ($lower -match "^(отчёт задач|отчет задач|agent report|итоги задач)") { return @{ intent = "agent_report"; args = @{} } }
+    if ($lower -match "^(заверши задачу|шаг задачи|complete task|next step)") { return @{ intent = "agent_step"; args = @{} } }
+    if ($lower -match "^(отмени задачу|останови задачу|stop agent)") { return @{ intent = "agent_cancel"; args = @{} } }
+
+    # Интерпретатор кода (Open Interpreter)
+    if ($lower -match "^(exec\s+код|exec|код[:\-\s]|выполни\s+код|run\s+code|interpreter)\s*(?:(python|py|js|javascript|node|ps1|powershell|bash|sh|shell)\b\s*)?[:\-]?\s*(.+)") {
+        $langHint = $Matches[2]; $code = $Matches[3].Trim()
+        if ($langHint -and $code.ToLower().StartsWith($langHint)) { $code = $code.Substring($langHint.Length).Trim() }
+        $quoted = [regex]::Match($t, '["“”«»](.+?)[\"“”«»]').Groups[1].Value
+        if ($quoted -and $quoted.Length -gt $code.Length * 0.6) { $code = $quoted }
+        return @{ intent = "exec_code"; args = @{ code = $code; lang = $langHint } }
+    }
+
+    # Git (Aider/OpenHands)
+    if ($lower -match "^git\s+(status|log|commit|add|push|pull|clone|branch|diff|init|checkout|merge|tag)(.*)") {
+        $repoM = [regex]::Match($t, '(?i)(?:в папке|репозиторий|repo)\s+["“”«]?([\w\.:\\/\-]+)')
+        return @{ intent = "git_op"; args = @{ gitargs = ("$($Matches[1])$($Matches[2])").Trim(); repo = $repoM.Groups[1].Value } }
+    }
+
+    # Анализ кода (Aider/SWE-agent)
+    if ($lower -match "^(проанализируй|разбери|изучи файл|структура файла|анализ кода|analyze)\b") {
+        $mm = [regex]::Match($t, '(?i)(?:файл|код)\s*[:"“”«]?([\w\.\-\\/~:]+\.\w+)')
+        $p = if ($mm.Success) { $mm.Groups[1].Value } elseif ($script:context.lastFile) { $script:context.lastFile } else { "" }
+        return @{ intent = "code_analyze"; args = @{ path = $p } }
+    }
+    if ($lower -match "^(grep|поиск в коде|найти в файлах|search code|где используется)\b") {
+        $mm = [regex]::Match($t, '["“”«](.+?)[\"“”»]')
+        $pat = if ($mm.Success) { $mm.Groups[1].Value } else { ($t -replace '^[\wа-яА-Я]+\s+', '') }
+        $rootM = [regex]::Match($t, '(?i)(?:в|в папке|в файлах)\s+["“”«]?([\w\.:\\/~\-]+\.\w+|[\w\.:\\/~\-]+)')
+        return @{ intent = "grep_codebase"; args = @{ pattern = $pat; root = $rootM.Groups[1].Value } }
+    }
+
+    # Память (MemGPT)
+    if ($lower -match "^(запомни|запиши в память|remember)\s*[:\-]?\s*(.+)") {
+        return @{ intent = "memory_add"; args = @{ fact = $Matches[2].Trim() } }
+    }
+    if ($lower -match "^(вспомни|что ты знаешь о|покажи память|recall|memory)\s*[:\-]?\s*(.*)") {
+        return @{ intent = "memory_recall"; args = @{ query = $Matches[2].Trim() } }
+    }
+    if ($lower -match "^(забудь|удали из памяти|forget)\s*[:\-]?\s*(.+)") {
+        return @{ intent = "memory_forget"; args = @{ query = $Matches[2].Trim() } }
+    }
+
+    # Мультимедиа (ScreenPipe / буфер обмена / заметки)
+    if ($lower -match "(сделай скриншот|скриншот экрана|screen shot|screenshot)") { return @{ intent = "screenshot"; args = @{} } }
+    if ($lower -match "^(буфер обмена|что в буфере|clipboard|вставь из буфера)") { return @{ intent = "clipboard_get"; args = @{} } }
+    if ($lower -match "^(скопируй в буфер|запиши в буфер|copy to clipboard)\s*[:\-]?\s*(.+)") {
+        $mm = [regex]::Match($t, '["“”«](.+?)[\"“”»]')
+        $txt = if ($mm.Success) { $mm.Groups[1].Value } else { $Matches[2].Trim() }
+        return @{ intent = "clipboard_set"; args = @{ text = $txt } }
+    }
+    if ($lower -match "^(заметка|note|запиши заметку|голосовая заметка)\s*[:\-]?\s*(.+)") {
+        return @{ intent = "note_add"; args = @{ text = $Matches[2].Trim() } }
+    }
+    if ($lower -match "^(покажи заметки|мои заметки|список заметок|show notes)") { return @{ intent = "notes_show"; args = @{} } }
+
+    # NL -> команды (Stenography/ShellGPT)
+    if ($lower -match "^(переведи в команды|подбери команду|как сделать|nl2cmd|какая команда для)") {
+        $body = $t -replace '^[^:]+:\s*', '' -replace '^(переведи в команды|подбери команду|как сделать|nl2cmd|какая команда для)\s*[:\-]?\s*', ''
+        return @{ intent = "nl2cmd"; args = @{ text = $body } }
+    }
+
+    if ($lower -match "^api\s+(GET|POST|PUT|DELETE|PATCH)\s+(\S+)\s*(.*)") {
+        return @{ intent = "api_call"; args = @{ method = $Matches[1].ToUpper(); url = $Matches[2]; body = $Matches[3].Trim() } }
+    }
+
+    # Вопросы к базе знаний — «спроси ...»
+    if ($lower -match "^(спроси|объясни|напиши эссе|придумай|сочини|расскажи про|ask llm|спрокси у модели)\s*[:\-]?\s*(.+)") {
+        return @{ intent = "llm_ask"; args = @{ prompt = $Matches[2].Trim() } }
+    }
+
+    if ($lower -match "^(расширенная помощь|все навыки|super help|скиллы|умения)") {
+        return @{ intent = "super_help"; args = @{} }
+    }
+
+    # Веб-навыки (AutoGPT-web / SearchGPT-style)
+    if ($lower -match "^(открой сайт|загрузи страницу|прочитай сайт|fetch url|web |открой http)") {
+        $mm = [regex]::Match($t, '(https?://\S+|[\w\-\.]+\.(com|org|net|io|ru|dev|ai)[\w\-/]*)')
+        if ($mm.Success) { return @{ intent = "web_fetch"; args = @{ url = $mm.Value } } }
     }
     if ($lower -match "^(открой|запусти|open|launch)\s+(не\s+)?(.+)") {
         $m = $Matches[3].Trim()
@@ -417,7 +955,12 @@ function Execute-Intent {
             if (-not $args2.path) { return @(@{ response = "ℹ️ Сначала откройте файл (например: покажи файл example.txt), затем: замени `"старое`" на `"новое`"" }, $intent) }
             return @(@{ response = Invoke-FileOperation (@{action="replace"} + $args2) }, $intent)
         }
-        "file_delete"     { return @(@{ response = Invoke-FileOperation (@{action="delete"} + $args2) }, $intent) }
+        "file_delete"     {
+            $bak = Backup-BeforeDanger $args2.path
+            $r = Invoke-FileOperation (@{action="delete"} + $args2)
+            if ($bak) { $r += "`n🛡️ Резервная копия: $bak" }
+            return @(@{ response = $r }, $intent)
+        }
         "file_mkdir"      { return @(@{ response = Invoke-FileOperation (@{action="mkdir"} + $args2) }, $intent) }
         "file_move"       { return @(@{ response = Invoke-FileOperation (@{action="move"} + $args2) }, $intent) }
         "file_copy"       { return @(@{ response = Invoke-FileOperation (@{action="copy"} + $args2) }, $intent) }
@@ -426,6 +969,46 @@ function Execute-Intent {
         "undo"            { return @(@{ response = Undo-LastChange }, $intent) }
         "system_status"   { return @(@{ response = Get-SystemStatus }, $intent) }
         "list_processes"  { return @(@{ response = Get-RunningProcesses }, $intent) }
+
+        # === v4.0: навыки открытых ИИ-систем ===
+        "agent_start"       { return @(@{ response = Start-AgentTask $args2.goal }, $intent) }
+        "agent_start_empty" { return @(@{ response = "ℹ️ Формат: выполни задачу <цель>, например: `nвыполни задачу создай папку `"project`" и установи requests" }, $intent) }
+        "agent_status"      { return @(@{ response = Get-AgentStatus }, $intent) }
+        "agent_report"      { return @(@{ response = Get-AgentReport }, $intent) }
+        "agent_step"        { return @(@{ response = Complete-AgentStep }, $intent) }
+        "agent_cancel"      { return @(@{ response = Cancel-AgentTask }, $intent) }
+        "exec_code"         { return @(@{ response = Invoke-AIInterpreterCode -Code $args2.code -LangHint $args2.lang }, $intent) }
+        "git_op"            { return @(@{ response = Invoke-GitOperation -GitArgs $args2.gitargs -RepoDir $args2.repo }, $intent) }
+        "code_analyze"      {
+            $p = if ($args2.path) { $args2.path } elseif ($script:context.lastFile) { $script:context.lastFile } else { $null }
+            if (-not $p) { return @(@{ response = "ℹ️ Укажите файл: проанализируй файл main.py (или сначала откройте файл)" }, $intent) }
+            return @(@{ response = Get-CodeSummary $p }, $intent)
+        }
+        "grep_codebase"     { return @(@{ response = Find-InCodebase -Pattern $args2.pattern -Root $args2.root }, $intent) }
+        "memory_add"        { return @(@{ response = Add-MemoryFact $args2.fact }, $intent) }
+        "memory_recall"     { return @(@{ response = Recall-Memories $args2.query }, $intent) }
+        "memory_forget"     { return @(@{ response = Forget-Memory $args2.query }, $intent) }
+        "screenshot"        { return @(@{ response = Take-Screenshot }, $intent) }
+        "clipboard_get"     { return @(@{ response = Get-ClipboardText }, $intent) }
+        "clipboard_set"     { return @(@{ response = Set-ClipboardText $args2.text }, $intent) }
+        "note_add"          { return @(@{ response = Add-VoiceNote $args2.text }, $intent) }
+        "notes_show"        { return @(@{ response = Show-Notes }, $intent) }
+        "nl2cmd"            { return @(@{ response = Translate-NlToCommands $args2.text }, $intent) }
+        "web_fetch"         { return @(@{ response = Invoke-WebRequestSkill $args2.url }, $intent) }
+        "api_call"          { return @(@{ response = Invoke-ApiCall -Method $args2.method -Url $args2.url -Body $args2.body }, $intent) }
+        "llm_ask"           {
+            # отвечаем из встроенной базы знаний
+            $kbHit = $null
+            foreach ($key in $script:knowledgeBase.Keys) {
+                foreach ($kw in $script:knowledgeBase[$key].keywords) {
+                    if ($args2.prompt.ToLower() -match $kw) { $kbHit = $script:knowledgeBase[$key].text; break }
+                }
+                if ($kbHit) { break }
+            }
+            $fallback = if ($kbHit) { "📚 Из базы знаний:`n$kbHit" } else { "💭 Такого нет в моей базе знаний. Попробуйте переформулировать вопрос или обратитесь к навыкам: «помощь»." }
+            return @(@{ response = $fallback }, $intent)
+        }
+        "super_help"        { return @(@{ response = Get-SuperHelp }, $intent) }
         "need_clarify_edit" {
             $hint = if ($script:context.lastFile) { "Активный файл: $(Split-Path $script:context.lastFile -Leaf). Скажите точнее, например: замени `"foo`" на `"bar`"" } else { "Сначала откройте файл: покажи файл имя.txt" }
             return @(@{ response = "✏️ $hint" }, $intent)
@@ -455,7 +1038,7 @@ function Get-AIResponse {
     if ($lower -match "^(привет|здравствуй|хай|hello)\b") {
         $hour = (Get-Date).Hour
         $greeting = if ($hour -lt 12) { "Доброе утро" } elseif ($hour -lt 18) { "Добрый день" } else { "Добрый вечер" }
-        return @{ response = "$greeting! Я J — ваш AI-ассистент. Умею работать с файлами, папками, программами и командами на вашем ПК, а также поддерживать беседу. Например: `n• покажи список файлов`n• создай файл `"test.txt`" текст: `"Привет!`"`n• выполни ipconfig`n• запусти notepad`n• статус системы"; intent = "greeting" }
+        return @{ response = "$greeting! Я J — ваш AI-ассистент v4.0 (навыки AutoGPT, Open Interpreter, Aider, MemGPT и др.). Умею: файлы/папки, команды, выполнение кода (exec python ...), автономные задачи (выполни задачу ...), память (запомни ...), git, веб (api GET ...), скриншоты, заметки. Напишите «помощь» или «все навыки»."; intent = "greeting" }
     }
     
     # Время
@@ -476,29 +1059,26 @@ function Get-AIResponse {
     
     # Помощь по возможностям
     if ($lower -match "^(помощь|help|что ты умеешь|команды|возможности)\b") {
-        return @{ response = @"
-🛠️ Мои возможности (всё логируется в logs/):
-📂 Файлы и папки:
-  • покажи список файлов [папка]
-  • покажи файл example.txt (чтение кода)
-  • создай файл `"test.txt`" текст: `"Привет!`"
-  • добавь в файл `"test.txt`" `"новая строка`"
-  • замени `"старое`" на `"новое`" (в активном файле)
-  • удали файл `"test.txt`" | создай папку `"new`"
-  • перемести/скопируй `"a.txt`" в `"b.txt`"
-  • найди `"report`" | отмени (последнее изменение)
-🖥️ Программы и команды (полный доступ к системе):
-  • выполни ipconfig /all
-  • запусти notepad | открой calc.exe
-📊 Система:
-  • статус системы | какие процессы запущены
-⚠️ Ограничений по путям и командам нет — работайте от имени администратора.
-   Все действия логируются; «отмени» возвращает последнее изменение файла.
-💬 Диалог: база знаний (python, javascript, ai, ml, нейросети), время, приветствия.
-"@; intent = "help" }
+        return @{ response = Get-SuperHelp; intent = "help" }
     }
 
-    # Поиск в базе знаний
+    # База знаний расширена: языки, фреймворки, DevOps, наука (как у открытых ассистентов)
+    $extraTopics = @{
+        "rust" = "🦀 Rust — системный язык с гарантией безопасности памяти без сборщика мусора. Используется в ОС, браузерах (Firefox), WASM."
+        "golang" = "🐹 Go — язык Google: простая конкурентность (goroutines), быстрая компиляция, микросервисы и DevOps-инструменты (Docker написан на Go)."
+        "docker" = "🐳 Docker — контейнеризация приложений. Основные команды: docker build, docker run, docker-compose up. Изолирует приложение со всеми зависимостями."
+        "kubernetes" = "☸️ Kubernetes — оркестрация контейнеров: масштабирование, самовосстановление, service discovery. Объекты: Pod, Deployment, Service."
+        "sql" = "🗄️ SQL — язык запросов к базам данных: SELECT, JOIN, GROUP BY. Диалекты: PostgreSQL, MySQL, SQLite, MSSQL."
+        "linux" = "🐧 Linux — открытая ОС: bash, пакетные менеджеры (apt/yum/pacman), systemd, права (chmod/chown). Основа серверов и Android."
+        "android" = "🤖 Android — ОС на ядре Linux. Разработка: Kotlin/Java + Android Studio; ADB для управления устройством; Termux — Linux-средa+PowerShell на телефоне."
+        "swift" = "🍎 Swift — язык Apple-экосистемы (iOS/macOS). SwiftUI для интерфейсов; Xcode — среда разработки. Альтернатива: React Native/Flutter."
+        "machine learning" = "🧠 ML-фреймворки: PyTorch и TensorFlow/Keras для нейросетей, scikit-learn для классики, Hugging Face Transformers для LLM."
+        "prompt engineering" = "✍️ Промпт-инжиниринг: чёткая роль, примеры (few-shot), цепочка рассуждений (chain-of-thought), структурированный вывод (JSON)."
+        "git" = "🌿 Git — системы контроля версий: commit, branch, merge, rebase, stash. Спросите ассистента: git status / git log / git commit -m msg."
+        "api" = "🔌 REST API: методы GET/POST/PUT/DELETE, коды 200/404/500, JSON. Проверьте сами: api GET https://api.github.com"
+    }
+
+    # Поиск в базе знаний (основная + расширенная тематическая)
     foreach ($key in $script:knowledgeBase.Keys) {
         $entry = $script:knowledgeBase[$key]
         foreach ($keyword in $entry.keywords) {
@@ -508,6 +1088,14 @@ function Get-AIResponse {
                 $script:context.topic = $key
                 return @{ response = $entry.text; intent = "kb:$key" }
             }
+        }
+    }
+    foreach ($topicKey in $extraTopics.Keys) {
+        if ($lower -match [regex]::Escape($topicKey)) {
+            $script:context.lastTopic = $script:context.topic
+            $script:context.topic = $topicKey
+            Write-ActionLog "KB_ANSWER" $topicKey "Расширенная база знаний"
+            return @{ response = $extraTopics[$topicKey]; intent = "kb:$topicKey" }
         }
     }
 
@@ -521,7 +1109,7 @@ function Get-AIResponse {
     }
 
     # Дефолтный ответ
-    return @{ response = "Я вас понял. Я умею работать с файлами, папками, программами и командами на ПК, а также поддерживать беседу (python, AI, ML, нейросети). Напишите «помощь», чтобы увидеть все команды.$historyHint"; intent = "default" }
+    return @{ response = "Я вас понял. Я умею всё: файлы/команды/код (exec), автономные задачи (AutoGPT-стиль), память (MemGPT-стиль), git, анализ кода (Aider/SWE-agent), веб и API, скриншоты, буфер обмена, заметки, база знаний (python, AI, docker, kubernetes, sql и др.). Напишите «помощь» или «все навыки».$historyHint"; intent = "default" }
 }
 
 function Process-Request {
@@ -597,29 +1185,13 @@ function Start-Server {
             Write-ServerLog "Получен запрос от $($request.RemoteEndPoint)"
             
             try {
-                # CORS-заголовки (клиент открывается как file://, браузер шлёт preflight-запросы)
-                $response.AddHeader("Access-Control-Allow-Origin", "*")
-                $response.AddHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-                $response.AddHeader("Access-Control-Allow-Headers", "Content-Type")
-
-                # Статическая раздача клиента: http://localhost:8080/ -> client.html
+                # Служебный GET-запрос (например проверка доступности сервера)
                 if ($request.HttpMethod -eq "GET") {
-                    $clientFile = Join-Path $ScriptDir "client.html"
-                    if (Test-Path $clientFile) {
-                        $htmlBytes = [System.IO.File]::ReadAllBytes($clientFile)
-                        $response.ContentType = "text/html; charset=utf-8"
-                        $response.ContentLength64 = $htmlBytes.Length
-                        $response.OutputStream.Write($htmlBytes, 0, $htmlBytes.Length)
-                    } else {
-                        $response.StatusCode = 404
-                    }
-                    $response.OutputStream.Close()
-                    continue
-                }
-
-                # Ответ на preflight-запрос браузера
-                if ($request.HttpMethod -eq "OPTIONS") {
-                    $response.StatusCode = 204
+                    $pingResp = @{ success = $true; response = "pong"; timestamp = Get-Date -Format "o" } | ConvertTo-Json
+                    $pingBytes = [System.Text.Encoding]::UTF8.GetBytes($pingResp)
+                    $response.ContentType = "application/json; charset=utf-8"
+                    $response.ContentLength64 = $pingBytes.Length
+                    $response.OutputStream.Write($pingBytes, 0, $pingBytes.Length)
                     $response.OutputStream.Close()
                     continue
                 }
@@ -686,7 +1258,7 @@ function Start-Server {
 Write-Host ""
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host "   J AI Assistant - Серверная часть" -ForegroundColor Cyan
-Write-Host "   Версия 3.0" -ForegroundColor Cyan
+Write-Host "   Версия 4.0 SUPER SKILLS" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
 Write-Host ""
 
