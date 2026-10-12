@@ -101,18 +101,16 @@ function Write-DialogLog {
 # Все операции логируются в logs/actions.log
 # ============================================
 
-$script:allowedDirs = @($ScriptDir, ([Environment]::GetFolderPath("Desktop")), ([Environment]::GetFolderPath("Documents")))
+# Ограничений по путям нет: ассистент работает со всей файловой системой.
+# Для безопасности на уровне ОС запускайте сервер от имени администратора
+# (PowerShell «Запуск от имени администратора») — тогда доступны системные папки.
 
 function Resolve-SafePath {
-    # Возвращает полный путь только внутри разрешённых директорий (защита от выхода за пределы)
+    # Разворачивает относительный путь в полный (любая локация в системе)
     param([string]$RawPath)
     if ([string]::IsNullOrWhiteSpace($RawPath)) { return $null }
     $candidate = if ([System.IO.Path]::IsPathRooted($RawPath)) { $RawPath } else { Join-Path (Get-Location).Path $RawPath }
-    try { $full = [System.IO.Path]::GetFullPath($candidate) } catch { return $null }
-    foreach ($dir in $script:allowedDirs) {
-        if ($full -like "$($dir.TrimEnd('\'))\*" -or $full -eq $dir) { return $full }
-    }
-    return $null
+    try { return [System.IO.Path]::GetFullPath($candidate) } catch { return $null }
 }
 
 function Get-FileInfoText {
@@ -125,7 +123,7 @@ function Invoke-FileOperation {
     param([hashtable]$Op)  # @{ action; path; ... }
     $action = $Op.action
     $path = Resolve-SafePath $Op.path
-    if (-not $path) { return "⛔ Путь недоступен или запрещён (разрешены: папка проекта, Рабочий стол, Документы)." }
+    if (-not $path) { return "⛔ Не удалось разобрать путь (проверьте корректность пути)." }
 
     switch ($action) {
         "list" {
@@ -247,17 +245,17 @@ function Undo-LastChange {
     return "↩️ Отменено: файл восстановлен ($($d.path))"
 }
 
-# Запуск программ и команд (с белым списком опасных паттернов)
+# Запуск программ и команд (без ограничений — полный доступ к системе)
 function Invoke-SystemCommand {
     param([string]$CommandLine)
-    if ($CommandLine -match "(?i)(rm\s+-rf|format\s+[a-z]:|del\s+/s|shutdown|diskpart|reg\s+delete|mkfs|\bdel\b.*\\\*|:\(\)\{)") {
-        Write-ActionLog "BLOCKED_CMD" $CommandLine "Заблокировано политикой безопасности"
-        return "⛔ Команда заблокирована: потенциально опасная операция."
-    }
     $script:context.lastCommand = $CommandLine
     Write-ServerLog "Выполняю команду: $CommandLine" "WARNING"
     try {
-        $output = & cmd.exe /c $CommandLine 2>&1 | Out-String
+        if ($IsMacOS -or $IsLinux) {
+            $output = & /bin/sh -c $CommandLine 2>&1 | Out-String
+        } else {
+            $output = & cmd.exe /c $CommandLine 2>&1 | Out-String
+        }
         $exitCode = $LASTEXITCODE
         $trimmed = if ($output.Length -gt 3000) { $output.Substring(0, 3000) + "`n...[обрезано]" } else { $output }
         if ([string]::IsNullOrWhiteSpace($trimmed)) { $trimmed = "(нет текстового вывода)" }
@@ -282,22 +280,25 @@ function Open-ProgramOrFile {
 }
 
 function Get-SystemStatus {
-    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
-    $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
-    $memTotalGB = if ($os) { [math]::Round($os.TotalVisibleMemorySize / 1MB, 1) } else { "?" }
-    $memFreeGB  = if ($os) { [math]::Round($os.FreePhysicalMemory / 1MB, 1) } else { "?" }
+    # Кроссплатформенно: Windows / macOS / Linux (Android через Termux + PowerShell)
+    $platform = if ($IsWindows) { "Windows" } elseif ($IsMacOS) { "macOS" } elseif ($IsLinux) { "Linux" } else { "Windows" }
+    $osName = "$platform $(if ($PSVersionTable) { "(PowerShell $($PSVersionTable.PSVersion))" })"
+    $cpuInfo = try { [Environment]::ProcessorCount } catch { "?" }
     $procs = (Get-Process -ErrorAction SilentlyContinue).Count
     $top = Get-Process -ErrorAction SilentlyContinue | Sort-Object CPU -Descending | Select-Object -First 5 |
            ForEach-Object { "   $($_.ProcessName) (PID $($_.Id))" }
-    $driveC = Get-PSDrive C -ErrorAction SilentlyContinue
-    $freeGB = if ($driveC) { [math]::Round($driveC.Free / 1GB, 1) } else { "?" }
-    Write-ActionLog "SYSTEM_STATUS" "local" "OK"
+    # Диск: C: на Windows, корень на Unix-системах
+    $drivePath = if ($IsWindows -or -not $PSVersionTable.ContainsKey("Platform")) { "C" } else { "/" }
+    $drive = Get-PSDrive $drivePath -ErrorAction SilentlyContinue
+    $freeGB = if ($drive -and $null -ne $drive.Free) { [math]::Round($drive.Free / 1GB, 1) } else { "?" }
+    $totalGB = if ($drive -and $null -ne $drive.Used -and $null -ne $drive.Free) { [math]::Round(($drive.Used + $drive.Free) / 1GB, 1) } else { "?" }
+    Write-ActionLog "SYSTEM_STATUS" $platform "OK"
     return @"
 🖥️ Статус системы:
-ОС: $(if ($os) { $os.Caption } else { "Windows" })
-Процессор: $(if ($cpu) { $cpu.Name.Trim() } else { "?" })
-RAM: свободно $memFreeGB GB из $memTotalGB GB
-Диск C: свободно $freeGB GB
+ОС: $osName
+Ядро: $([System.Environment]::OSVersion.VersionString)
+CPU ядер: $cpuInfo
+Диск '$drivePath': свободно $freeGB GB из $totalGB GB
 Процессов: $procs
 Топ-5 по CPU:
 $($top -join "`n")
@@ -486,11 +487,13 @@ function Get-AIResponse {
   • удали файл `"test.txt`" | создай папку `"new`"
   • перемести/скопируй `"a.txt`" в `"b.txt`"
   • найди `"report`" | отмени (последнее изменение)
-🖥️ Программы и команды:
+🖥️ Программы и команды (полный доступ к системе):
   • выполни ipconfig /all
   • запусти notepad | открой calc.exe
 📊 Система:
   • статус системы | какие процессы запущены
+⚠️ Ограничений по путям и командам нет — работайте от имени администратора.
+   Все действия логируются; «отмени» возвращает последнее изменение файла.
 💬 Диалог: база знаний (python, javascript, ai, ml, нейросети), время, приветствия.
 "@; intent = "help" }
     }
