@@ -137,6 +137,11 @@ function Invoke-FileOperation {
     $action = $Op.action
     $path = Resolve-SafePath $Op.path
     if (-not $path) { return "⛔ Не удалось разобрать путь (проверьте корректность пути)." }
+    # Если относительное имя не найдено в текущей папке, но такой файл является активным — используем его полный путь
+    if (-not (Test-Path $path) -and -not [System.IO.Path]::IsPathRooted($Op.path) -and $script:context.lastFile) {
+        $lfName = Split-Path $script:context.lastFile -Leaf
+        if ($lfName -eq (Split-Path $path -Leaf)) { $path = $script:context.lastFile }
+    }
 
     switch ($action) {
         "list" {
@@ -776,12 +781,14 @@ function Parse-Intent {
                elseif ($relM.Success)  { $relM.Groups[1].Value }
                else                   { "" }
     # Очистка хвостов служебных слов и пунктуации
-    $fileArg = ($fileArg -replace '(?i)\s+(?:текст|содержимое|с \u0442екстом|информация|о файле|о папке|в|в|на|for|about)\s*$', '').TrimEnd(',', '.', ';', ':', ' ')
-    $fileArg = ($fileArg -replace '(?i)^(в|\u043d\u0430)\s+', '')
+    $fileArg = ($fileArg -replace '(?i)\s+(?:текст|содержимое|с текстом|информация|о файле|о папке|в|на|for|about)\s*$', '').TrimEnd(',', '.', ';', ':', ' ')
+    $fileArg = ($fileArg -replace '(?i)^(в|на)\s+', '')
 
     # Программы и команды (кроме «выполни код/задачу» — их обрабатывают правила ниже)
     if ($lower -match "^(выполни|запусти команду|run|команда)\s*[:\-]?\s*(.+)" -and $lower -notmatch "^(выполни\s+(код|задачу)|run code)") {
-        return @{ intent = "run_command"; args = @{ command = $Matches[2].Trim() } }
+        # Команда — всё, что после глагола (без обрезки по предлогам «в/на» и без подмены цитатами)
+        $cmd = $Matches[2].Trim()
+        return @{ intent = "run_command"; args = @{ command = $cmd } }
     }
 
     # === v4.0: НАВЫКИ ОТКРЫТЫХ ИИ-СИСТЕМ (проверяются раньше файловых) ===
@@ -798,11 +805,11 @@ function Parse-Intent {
     if ($lower -match "^(отмени задачу|останови задачу|stop agent)") { return @{ intent = "agent_cancel"; args = @{} } }
 
     # Интерпретатор кода (Open Interpreter)
-    if ($lower -match "^(exec\s+код|exec|код[:\-\s]|выполни\s+код|run\s+code|interpreter)\s*(?:(python|py|js|javascript|node|ps1|powershell|bash|sh|shell)\b\s*)?[:\-]?\s*(.+)") {
-        $langHint = $Matches[2]; $code = $Matches[3].Trim()
-        if ($langHint -and $code.ToLower().StartsWith($langHint)) { $code = $code.Substring($langHint.Length).Trim() }
-        if ($quotedRaw -and $quotedRaw.Length -gt $code.Length * 0.6) { $code = $quotedRaw }
-        if ($quoted -and $quoted.Length -gt $code.Length * 0.6) { $code = $quoted }
+    if ($lower -match "^(exec\s+код|exec|код[:\-\s]|выполни\s+код|run\s+code|interpreter)\s*(?:(python|py|js|javascript|node|nodejs|ps1|powershell|pwsh|bash|sh|shell)\b\s*)?[:\-]?\s*(.+)") {
+        $langHint = ($Matches[2] -replace '^(nodejs)$','node').Trim(); $code = $Matches[3].Trim()
+        # Кавычки — часть кода (console.log("hi")); подмена цитатой только если код целиком в кавычках
+        $qm = [regex]::Match($t, '^.*["“«](.+?)["”»]\s*$')
+        if ($qm.Success -and $code.Trim('"“»«') -eq $qm.Groups[1].Value) { $code = $qm.Groups[1].Value }
         return @{ intent = "exec_code"; args = @{ code = $code; lang = $langHint } }
     }
 
@@ -813,7 +820,7 @@ function Parse-Intent {
     }
 
     # Анализ кода (Aider/SWE-agent)
-    if ($lower -match "^(проанализируй|разбери|изучи файл|структура файла|анализ кода|analyze)\b") {
+    if ($lower -match "^(проанализируй|разбери|изучи( файл)?|структура файла|анализ кода|анализ файла?|analyze)\b") {
         $mm = [regex]::Match($t, '(?i)(?:файл|код)\s*[:"“”«]?([\w\.\-\\/~:]+\.\w+)')
         $p = if ($mm.Success) { $mm.Groups[1].Value } elseif ($script:context.lastFile) { $script:context.lastFile } else { "" }
         return @{ intent = "code_analyze"; args = @{ path = $p } }
@@ -844,7 +851,7 @@ function Parse-Intent {
         $txt = if ($mm.Success) { $mm.Groups[1].Value } else { $Matches[2].Trim() }
         return @{ intent = "clipboard_set"; args = @{ text = $txt } }
     }
-    if ($lower -match "^(заметка|note|запиши заметку|голосовая заметка)\s*[:\-]?\s*(.+)") {
+    if ($lower -match "^(заметка|note|запиши(\\s+заметку?)?|сделай\\s+заметку?|добавь\\s+заметку?|голосовая\\s+заметка)\s*[:\-]?\s*(.+)") {
         return @{ intent = "note_add"; args = @{ text = $Matches[2].Trim() } }
     }
     if ($lower -match "^(покажи заметки|мои заметки|список заметок|show notes)") { return @{ intent = "notes_show"; args = @{} } }
@@ -885,9 +892,34 @@ function Parse-Intent {
 
     # Диалог о коде с активным файлом ("измени", "покажи строку N")
     if ($lower -match "^(измени|исправь|замени|поправь|edit|fix)\b") {
-        $mm = [regex]::Match($t, '(?i)замени\s*["“«]?(.+?)["”»]?\s+(на|в|=>|->)\s*["“«]?(.+?)["”»]?$')
+        # Явные кавычки имеют приоритет: замени "<найди>" на "<замена>"
+        $qAll = [regex]::Matches($t, '["“«](.+?)["”»]')
+        if ($qAll.Count -ge 2) {
+            $findVal = $qAll[0].Groups[1].Value
+            $replVal = $qAll[1].Groups[1].Value
+            $pathVal = ""
+            # Полный абсолютный путь из текста запроса
+            $absM = [regex]::Match($t, '((?:[A-Za-z]:[\\/]|\\\\|~/|/)[^\s"<>|?*]+)')
+            if ($absM.Success) { $pathVal = $absM.Groups[1].Value }
+            else {
+                # Имя файла после «файл/файла/файле/папке ...» (кроме служебного «файл с текстом»)
+                $fm = [regex]::Match($t, '(?i)(?:файла?|файле|папк[уи]|папке|file)\s+(?!(?:с\s+текстом|текстом|текст[:\s]))([^\s"“»«]+)')
+                if ($fm.Success) { $pathVal = ($fm.Groups[1].Value -replace '[,.:;]+$','') }
+            }
+            if (-not $pathVal) { $pathVal = $script:context.lastFile }
+            return @{ intent = "file_replace"; args = @{ path = $pathVal; find = $findVal; replace = $replVal } }
+        }
+        # Без кавычек: замени X на Y
+        $mm = [regex]::Match($t, '(?i)замени\s*["“«]?(.+?)["”»]?\s+(?:на|=>|->)\s*["“«]?(.+?)["”»]?$')
         if ($mm.Success) {
-            return @{ intent = "file_replace"; args = @{ path = $fileArg; find = $mm.Groups[1].Value; replace = $mm.Groups[3].Value } }
+            $findVal = $mm.Groups[1].Value.Trim()
+            $replVal = $mm.Groups[2].Value.Trim()
+            $pathVal = ""
+            $absM = [regex]::Match($t, '((?:[A-Za-z]:[\\/]|\\\\|~/|/)[^\s"<>|?*]+)')
+            if ($absM.Success) { $pathVal = $absM.Groups[1].Value }
+            elseif ($fileArg -and $fileArg -ne $findVal -and $fileArg -ne $replVal) { $pathVal = $fileArg }
+            if (-not $pathVal) { $pathVal = $script:context.lastFile }
+            return @{ intent = "file_replace"; args = @{ path = $pathVal; find = $findVal; replace = $replVal } }
         }
         return @{ intent = "need_clarify_edit"; args = @{} }
     }
