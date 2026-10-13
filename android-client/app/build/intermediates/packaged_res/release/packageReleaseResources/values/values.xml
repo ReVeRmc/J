@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="accent">#FF4C8DFF</color>
+    <color name="accent_active">#FFFF5252</color>
+    <color name="bg">#FF101014</color>
+    <color name="surface">#FF1A1A22</color>
+    <color name="text">#FFEAEAF0</color>
+    <color name="text_dim">#FF8A8A96</color>
+    <color name="white">#FFFFFFFF</color>
+    <string name="app_name">J AI Assistant</string>
+    <string name="chat_hint">Введите команду…</string>
+    <string name="listening">● Слушаю… нажмите ещё раз, чтобы остановить</string>
+    <string name="save_server">Сохранить адрес сервера</string>
+    <string name="send">Отправить</string>
+    <string name="server_hint">Адрес сервера, напр. http://192.168.0.100:8080</string>
+    <string name="voice_button">Голосовой диалог</string>
+    <style name="Theme.JAssistant" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/accent</item>
+        <item name="colorOnPrimary">@color/white</item>
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@color/bg</item>
+        <item name="android:navigationBarColor">@color/bg</item>
+    </style>
+</resources>

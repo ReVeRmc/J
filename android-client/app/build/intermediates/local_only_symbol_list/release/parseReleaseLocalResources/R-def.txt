@@ -1,0 +1,33 @@
+R_DEF: Internal format may change without notice
+local
+color accent
+color accent_active
+color bg
+color surface
+color text
+color text_dim
+color white
+drawable bg_mic
+drawable bg_mic_active
+drawable bg_send
+drawable ic_check
+drawable ic_mic
+drawable ic_send
+id btn_save_server
+id btn_send
+id chat_log
+id input_message
+id input_server
+id mic_button
+id scroll_chat
+id status_listening
+layout activity_main
+mipmap ic_launcher
+string app_name
+string chat_hint
+string listening
+string save_server
+string send
+string server_hint
+string voice_button
+style Theme.JAssistant
