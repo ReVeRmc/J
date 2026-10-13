@@ -1,0 +1,40 @@
+[2026-10-12 21:17:39] [RUN_CMD] Target: echo hello from android | Result: Код возврата: 0
+[2026-10-12 21:21:25] [CREATE_FILE] Target: /tmp/test_j.txt | Result: Записано 9 симв.
+[2026-10-12 21:21:25] [READ_FILE] Target: /tmp/test_j.txt | Result: Прочитано 0 KB
+[2026-10-12 21:21:25] [RUN_CMD] Target: echo hello world | Result: Код возврата: 0
+[2026-10-12 21:21:25] [RUN_CODE] Target: Python (print(2+2)) | Result: OK
+[2026-10-12 21:21:25] [MEMORY_ADD] Target: - | Result: Запомнено: мой любимый цвет синий
+[2026-10-12 21:21:25] [MEMORY_RECALL] Target:  | Result: Найдено: 1
+[2026-10-12 21:21:26] [SYSTEM_STATUS] Target: Linux | Result: OK
+[2026-10-12 21:21:26] [UNDO_DELETE_CREATED] Target: /tmp/test_j.txt | Result: Отменено создание
+[2026-10-12 21:21:29] [CREATE_FILE] Target: /tmp/t2.txt | Result: Записано 9 симв.
+[2026-10-12 21:22:01] [CREATE_FILE] Target: /tmp/t3.txt | Result: Записано 13 симв.
+[2026-10-12 21:22:01] [READ_FILE] Target: /tmp/t3.txt | Result: Прочитано 0 KB
+[2026-10-12 21:22:01] [REPLACE_IN_FILE] Target: /tmp/t3.txt | Result: Заменено вхождений: 1 («мир» -> «земля»)
+[2026-10-12 21:22:01] [READ_FILE] Target: /tmp/t3.txt | Result: Прочитано 0 KB
+[2026-10-12 21:23:03] [CREATE_FILE] Target: /tmp/t4.txt | Result: Записано 13 симв.
+[2026-10-12 21:23:03] [READ_FILE] Target: /tmp/t4.txt | Result: Прочитано 0 KB
+[2026-10-12 21:23:03] [REPLACE_IN_FILE] Target: /tmp/t4.txt | Result: Заменено вхождений: 1 («мир» -> «земля»)
+[2026-10-12 21:23:03] [READ_FILE] Target: /tmp/t4.txt | Result: Прочитано 0 KB
+[2026-10-12 21:23:03] [APPEND_FILE] Target: /tmp/t4.txt | Result: Добавлено 0 симв.
+[2026-10-12 21:23:03] [INFO] Target: /tmp/t4.txt | Result: Файл, 29 байт
+[2026-10-12 21:23:04] [BACKUP] Target: /tmp/t4.txt -> /tmp/t4.txt.bak_20261012_212303 | Result: OK
+[2026-10-12 21:23:04] [DELETE] Target: /tmp/t4.txt | Result: Удалено
+[2026-10-12 21:23:39] [CREATE_FILE] Target: /tmp/t5.txt | Result: Записано 13 симв.
+[2026-10-12 21:23:39] [REPLACE_IN_FILE] Target: /tmp/t5.txt | Result: Заменено вхождений: 1 («привет» -> «пока»)
+[2026-10-12 21:23:39] [READ_FILE] Target: /tmp/t5.txt | Result: Прочитано 0 KB
+[2026-10-12 21:23:39] [REPLACE_IN_FILE] Target: /tmp/t5.txt | Result: Заменено вхождений: 1 («мир» -> «земля»)
+[2026-10-12 21:23:39] [READ_FILE] Target: /tmp/t5.txt | Result: Прочитано 0 KB
+[2026-10-12 21:23:39] [UNDO_RESTORE] Target: /tmp/t5.txt | Result: Восстановлено предыдущее содержимое
+[2026-10-12 21:23:39] [AGENT_START] Target: task#1 | Result: Цель: создай файл /tmp/agent_test.txt и запиши туда "готово"
+[2026-10-12 21:23:39] [LIST_DIR] Target: /tmp | Result: Найдено объектов: 30
+[2026-10-12 21:23:39] [SEARCH] Target: /tmp (*файлы *.txt в /tmp*) | Result: Найдено: 0
+[2026-10-12 21:23:39] [API_CALL] Target: GET https://example.com | Result: HTTP 200
+[2026-10-12 21:23:39] [GIT] Target: git status @ /workspace | Result: Код: 0
+[2026-10-12 21:23:39] [RUN_CODE] Target: Python (auto) (возврата предыдущей команды) | Result: OK
+[2026-10-12 21:23:39] [BACKUP] Target: /tmp/t5.txt -> /tmp/t5.txt.bak_20261012_212339 | Result: OK
+[2026-10-12 21:23:39] [DELETE] Target: /tmp/t5.txt | Result: Удалено
+[2026-10-12 21:23:39] [MEMORY_ADD] Target: - | Result: Запомнено: сервер deployed на порту 8080
+[2026-10-12 21:23:40] [SYSTEM_STATUS] Target: Linux | Result: OK
+[2026-10-12 21:23:40] [LIST_PROCESSES] Target: local | Result: Показано топ-15
+[2026-10-12 21:23:40] [MKDIR] Target: /tmp/jtest_dir | Result: Создана папка

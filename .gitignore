@@ -1,6 +1,1 @@
-logs/
-*.log
-android-client/local.properties
-android-client/app/build/
-android-client/.gradle/
-*.idsig
+__pycache__/

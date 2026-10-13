@@ -1,0 +1,34 @@
+[
+    {
+        "merged": "com.jai.assistant.app-release-31:/drawable_bg_mic.xml.flat",
+        "source": "com.jai.assistant.app-main-32:/drawable/bg_mic.xml"
+    },
+    {
+        "merged": "com.jai.assistant.app-release-31:/layout_activity_main.xml.flat",
+        "source": "com.jai.assistant.app-main-32:/layout/activity_main.xml"
+    },
+    {
+        "merged": "com.jai.assistant.app-release-31:/drawable_ic_send.xml.flat",
+        "source": "com.jai.assistant.app-main-32:/drawable/ic_send.xml"
+    },
+    {
+        "merged": "com.jai.assistant.app-release-31:/drawable_bg_mic_active.xml.flat",
+        "source": "com.jai.assistant.app-main-32:/drawable/bg_mic_active.xml"
+    },
+    {
+        "merged": "com.jai.assistant.app-release-31:/mipmap-anydpi-v26_ic_launcher.xml.flat",
+        "source": "com.jai.assistant.app-main-32:/mipmap-anydpi-v26/ic_launcher.xml"
+    },
+    {
+        "merged": "com.jai.assistant.app-release-31:/drawable_bg_send.xml.flat",
+        "source": "com.jai.assistant.app-main-32:/drawable/bg_send.xml"
+    },
+    {
+        "merged": "com.jai.assistant.app-release-31:/drawable_ic_mic.xml.flat",
+        "source": "com.jai.assistant.app-main-32:/drawable/ic_mic.xml"
+    },
+    {
+        "merged": "com.jai.assistant.app-release-31:/drawable_ic_check.xml.flat",
+        "source": "com.jai.assistant.app-main-32:/drawable/ic_check.xml"
+    }
+]

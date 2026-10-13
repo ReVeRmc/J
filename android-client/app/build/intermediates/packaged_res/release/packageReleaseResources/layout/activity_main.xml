@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/bg">
+
+    <!-- Настройка сервера (сворачивается после сохранения) -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="8dp"
+        android:gravity="center_vertical">
+
+        <EditText
+            android:id="@+id/input_server"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:hint="@string/server_hint"
+            android:inputType="textUri"
+            android:textSize="13sp"
+            android:textColorHint="@color/text_dim"
+            android:textColor="@color/text_dim"
+            android:singleLine="true" />
+
+        <ImageButton
+            android:id="@+id/btn_save_server"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:src="@drawable/ic_check"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/save_server" />
+    </LinearLayout>
+
+    <!-- Лог диалога -->
+    <ScrollView
+        android:id="@+id/scroll_chat"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:padding="12dp"
+        android:scrollbars="none">
+
+        <TextView
+            android:id="@+id/chat_log"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="@color/text"
+            android:textSize="15sp"
+            android:lineSpacingExtra="4dp" />
+    </ScrollView>
+
+    <!-- Индикатор прослушивания -->
+    <TextView
+        android:id="@+id/status_listening"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/listening"
+        android:textColor="@color/accent"
+        android:textSize="14sp"
+        android:gravity="center"
+        android:visibility="gone" />
+
+    <!-- Большая голосовая кнопка по центру экрана -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content">
+
+        <ImageButton
+            android:id="@+id/mic_button"
+            android:layout_width="120dp"
+            android:layout_height="120dp"
+            android:layout_gravity="center"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="8dp"
+            android:background="@drawable/bg_mic"
+            android:src="@drawable/ic_mic"
+            android:scaleType="centerInside"
+            android:padding="30dp"
+            android:contentDescription="@string/voice_button" />
+    </FrameLayout>
+
+    <!-- Строка чата -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="10dp"
+        android:gravity="center_vertical"
+        android:background="@color/surface">
+
+        <EditText
+            android:id="@+id/input_message"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:hint="@string/chat_hint"
+            android:inputType="text"
+            android:textColor="@color/text"
+            android:textColorHint="@color/text_dim"
+            android:singleLine="true"
+            android:imeOptions="actionSend" />
+
+        <ImageButton
+            android:id="@+id/btn_send"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:src="@drawable/ic_send"
+            android:background="@drawable/bg_send"
+            android:padding="12dp"
+            android:contentDescription="@string/send" />
+    </LinearLayout>
+</LinearLayout>
