@@ -1,0 +1,21 @@
+# Нормализация строк и кодировок при клонировании на Windows
+*.bat  text eol=crlf working-tree-encoding=UTF-8
+*.cmd  text eol=crlf working-tree-encoding=UTF-8
+
+# .ps1 хранятся в git как UTF-8 с BOM (двоично) — BOM обязателен для Windows PowerShell 5.1
+*.ps1  -text
+
+# Текст — LF по умолчанию
+*.html text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.kt   text eol=lf
+*.xml  text eol=lf
+*.gradle text eol=lf
+
+# Бинарные файлы — никогда не конвертировать
+*.apk  binary
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.zip  binary
