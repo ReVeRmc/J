@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">J AI Assistant</string>
+    <string name="server_hint">Адрес сервера, напр. http://192.168.0.100:8080</string>
+    <string name="save_server">Сохранить адрес сервера</string>
+    <string name="chat_hint">Введите команду…</string>
+    <string name="send">Отправить</string>
+    <string name="voice_button">Голосовой диалог</string>
+    <string name="listening">● Слушаю… нажмите ещё раз, чтобы остановить</string>
+</resources>
