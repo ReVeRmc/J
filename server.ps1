@@ -1214,13 +1214,36 @@ function Process-Request {
 }
 
 function Start-Server {
-    Write-ServerLog "Запуск сервера J AI Assistant..." "SUCCESS"
+    Write-ServerLog "Запуск сервера J AI Assistant..." "SUCCESS"
+
+    # Auto-add Windows Firewall rule so phones/PCs in LAN and via internet tunnel can connect (requires admin)
+    try {
+        $fwRuleName = "J AI Assistant Server Port $Port"
+        $existingFw = Get-NetFirewallRule -DisplayName $fwRuleName -ErrorAction SilentlyContinue
+        if (-not $existingFw) {
+            New-NetFirewallRule -DisplayName $fwRuleName -Direction Inbound -Protocol TCP -LocalPort $Port -Action Allow -Profile Any | Out-Null
+            Write-ServerLog "Брандмауэр Windows: правило для порта $Port создано" "SUCCESS"
+        } else {
+            Write-ServerLog "Брандмауэр Windows: правило для порта $Port уже существует" "INFO"
+        }
+    } catch {
+        Write-ServerLog "Брандмауэр Windows: не удалось настроить правило автоматически. Откройте порт $Port вручную." "WARNING"
+    }
     Write-ServerLog "Сервер доступен на http://$($ServerHost):$Port" "SUCCESS"
     Write-ServerLog "Нажмите Ctrl+C для остановки" "WARNING"
     Write-Host ""
     
     $listener = New-Object System.Net.HttpListener
-    $listener.Prefixes.Add("http://$($ServerHost):$Port/")
+    # Localhost always available even without admin rights
+    $listener.Prefixes.Add("http://localhost:$Port/")
+    $listener.Prefixes.Add("http://127.0.0.1:$Port/")
+    # "+" opens the port on ALL interfaces: phones in LAN and access via internet
+    # (tunnel/port forwarding). Requires admin - start-server.bat elevates automatically.
+    try {
+        $listener.Prefixes.Add("http://+:$Port/")
+    } catch {
+        Write-ServerLog "Не удалось открыть порт на всех интерфейсах (нужны права администратора). Доступ только с этого ПК." "WARNING"
+    }
     
     try {
         $listener.Start()
